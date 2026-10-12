@@ -164,6 +164,7 @@ function applyBootstrapPayload(payload) {
   if (payload.csrf) window.FluxCsrf = payload.csrf;
   if (payload.contextHint !== undefined) window.FluxContextHint = payload.contextHint;
   if (payload.inlineEditorEnabled !== undefined) window.FluxInlineEditorEnabled = payload.inlineEditorEnabled;
+  if (payload.liveUpdateInPreviewMode !== undefined) window.FluxLiveUpdateInPreviewMode = payload.liveUpdateInPreviewMode;
   applyContext(payload.context);
 }
 function applyInlineHostBootstrap() {

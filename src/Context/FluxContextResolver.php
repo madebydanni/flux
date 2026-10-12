@@ -198,7 +198,7 @@ class FluxContextResolver
             if ($orderable) {
                 $sortField = $orderable->getSortField();
 
-                if (!$relation['sortable']) {
+                if (!array_key_exists('sortable', $relation)) {
                     $schema[$className]['RelationFields'][$relationName]['sortField'] = $sortField;
                 }
             }

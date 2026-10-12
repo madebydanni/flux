@@ -15,13 +15,14 @@ use SilverStripe\View\Requirements;
  * Mounts the host JS and ships a bootstrap payload: inline for a full-page load, as a
  * form field for PJAX. Nested GridField items need no special handling here:
  * `LeftAndMain::currentRecordID()` already resolves them via `CMSMainCurrentRecordID`.
+ * A LeftAndMain that runs no live update, such as an editor module's canvas page, sets `flux_live_update` to false.
  */
 class FluxLeftAndMainExtension extends Extension
 {
 
     public function onBeforeInit(): void
     {
-        if (!Security::getCurrentUser()) {
+        if (!Security::getCurrentUser() || !$this->getOwner()->config()->get('flux_live_update')) {
             return;
         }
 
@@ -31,7 +32,7 @@ class FluxLeftAndMainExtension extends Extension
 
     public function onAfterInit(): void
     {
-        if (!Security::getCurrentUser()) {
+        if (!Security::getCurrentUser() || !$this->getOwner()->config()->get('flux_live_update')) {
             return;
         }
 
@@ -86,6 +87,7 @@ class FluxLeftAndMainExtension extends Extension
             'contextUrl' => '/flux/context',
             'csrf' => SecurityToken::getSecurityID(),
             'inlineEditorEnabled' => (bool) Configuration::config()->get('enable_inline_editor'),
+            'liveUpdateInPreviewMode' => (bool) Configuration::config()->get('live_update_in_preview_mode'),
         ];
     }
 

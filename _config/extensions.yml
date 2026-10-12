@@ -1,4 +1,5 @@
 SilverStripe\Admin\LeftAndMain:
+  flux_live_update: true
   extra_requirements_css:
     - 'dannidickson/flux: client/dist/styles/bundle.css'
   extensions:
