@@ -5,8 +5,10 @@ namespace Flux\Extension;
 use Flux\Context\FluxContextResolver;
 use Flux\Core\Configuration;
 use SilverStripe\Control\Controller;
+use SilverStripe\Control\HTTPRequest;
 use SilverStripe\Control\Middleware\HTTPCacheControlMiddleware;
 use SilverStripe\Core\Extension;
+use SilverStripe\Model\ModelData;
 use SilverStripe\ORM\DataObject;
 use SilverStripe\Security\SecurityToken;
 use SilverStripe\View\Requirements;
@@ -20,6 +22,11 @@ use SilverStripe\View\Requirements;
  */
 class FluxExtension extends Extension
 {
+
+    /**
+     * Set when this render is for an editor module's page script, so the module may change its HTML.
+     */
+    private bool $rendersForEditor = false;
 
     public function onBeforeInit(): void
     {
@@ -43,6 +50,68 @@ class FluxExtension extends Extension
         Requirements::javascript('dannidickson/flux: client/dist/js/silverstripe-cms/frame.js');
 
         $this->injectFrameContext();
+
+        if (!$this->rendersForEditorModule($request)) {
+            return;
+        }
+
+        $this->includeEditorPageRequirements();
+        $this->getOwner()->extend('beforeEditorRender', $request);
+        $this->rendersForEditor = true;
+    }
+
+    /**
+     * Lets an editor module change the HTML of its render (`updateEditorHtml`). Only a render through an action
+     * handler is offered, which is how a preview renders a page.
+     */
+    public function afterCallActionHandler(HTTPRequest $request, string $action, mixed $result): ?string
+    {
+        if (!$this->rendersForEditor) {
+            return null;
+        }
+
+        if (!is_string($result) && !$result instanceof ModelData) {
+            return null;
+        }
+
+        $record = $this->getOwner()->data();
+
+        if (!$record instanceof DataObject || !$record->exists()) {
+            return null;
+        }
+
+        $html = $result;
+
+        if ($result instanceof ModelData) {
+            $html = $result->forTemplate();
+        }
+
+        $this->getOwner()->extend('updateEditorHtml', $html, $record);
+
+        return $html;
+    }
+
+    /**
+     * Whether an editor module takes this preview render for its page script: any extension answering
+     * `isEditorRender` with true.
+     */
+    private function rendersForEditorModule(HTTPRequest $request): bool
+    {
+        return in_array(true, $this->getOwner()->extend('isEditorRender', $request), true);
+    }
+
+    /**
+     * Adds the page script and stylesheet that an editor module registers in config.
+     */
+    private function includeEditorPageRequirements(): void
+    {
+        foreach (Configuration::config()->get('editor_page_javascript') as $file) {
+            Requirements::javascript($file);
+        }
+
+        foreach (Configuration::config()->get('editor_page_css') as $file) {
+            Requirements::css($file);
+        }
     }
 
     private function injectFrameContext(): void

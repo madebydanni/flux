@@ -33,13 +33,10 @@ export default class FluxDirectiveManager {
             value: string,
             owner: string | null,
         ) => void,
+        private acceptsInputFrom: (element: HTMLElement) => boolean,
     ) {}
 
-    /**
-     * Last value seen per schema-bound field. These can't be tracked on the
-     * element the way the entwine bindings do — React hands us a new node on
-     * every change — so they're keyed by input name instead.
-     */
+    /** Last value seen per schema-bound field, keyed by input name because React replaces the node on every change. */
     private schemaBoundValues = new Map<string, string>();
 
     initialize(): void {
@@ -51,15 +48,9 @@ export default class FluxDirectiveManager {
     }
 
     /**
-     * Fields whose React component drops the fx-* attributes never match
-     * `[fx-key]`, so the entwine binding above never sees them (Boolean fields
-     * are the common case — an unchecked `<% if $ShowTitle %>` would do
-     * nothing). Their bindings still exist in the form schema, so listen at the
-     * document and look them up by input name.
-     *
-     * Capture phase: a checkbox's `checked` is already flipped by the time the
-     * click event dispatches, and listening early keeps us clear of whatever
-     * React does with the event afterwards.
+     * Handles fields whose React component drops the fx-* attributes, such as Boolean fields, by listening at the
+     * document and looking up their bindings in the form schema by input name. It listens in the capture phase,
+     * because a checkbox's `checked` has already flipped when its click dispatches.
      */
     private setupSchemaBindings(): void {
         const handler = (event: Event): void => this.handleSchemaBoundEvent(event);
@@ -75,7 +66,6 @@ export default class FluxDirectiveManager {
         const name = (target as HTMLInputElement).name;
         if (!name) return;
 
-        // Anything carrying its own attributes is the entwine binding's.
         if (target.closest("[fx-key]")) return;
 
         const attributes = fluxAttributesForField(name);
@@ -103,11 +93,15 @@ export default class FluxDirectiveManager {
         $("[fx-key]").entwine({
             onmatch: function (this: any) {
                 const element: HTMLElement = this[0];
+
+                if (!manager.acceptsInputFrom(element)) {
+                    return;
+                }
+
                 const binding = fromElement(element);
 
                 if (!binding) return;
 
-                // Watch for file upload / react dropdown changes
                 if (binding.proxySelector) {
                     manager.observeKeyProxyElement(element, binding);
                     return;
@@ -142,6 +136,10 @@ export default class FluxDirectiveManager {
         binding: FluxDirective,
         previousValue: string,
     ): string {
+        if (!this.acceptsInputFrom(element)) {
+            return previousValue;
+        }
+
         let value: any;
         let rawType: string;
 
@@ -158,8 +156,6 @@ export default class FluxDirectiveManager {
             ));
         }
 
-        // Upgrade Text → HTML when a field transitions from empty to non-empty,
-        // so a full template re-render is triggered instead of a text patch.
         let type = rawType;
         if (rawType === "Text" && shouldUpgradeToHtml(previousValue, value, this.hostChannel.isInlineEditInProgress)) {
             type = "HTML";
@@ -228,6 +224,11 @@ export default class FluxDirectiveManager {
 
             if (currentValue !== previousValue) {
                 previousValue = currentValue;
+
+                if (!this.acceptsInputFrom(element)) {
+                    return;
+                }
+
                 this.fluxState.updateField(binding.key, currentValue, {
                     owner: binding.owner ?? undefined,
                 });
@@ -253,6 +254,10 @@ export default class FluxDirectiveManager {
         let previousContent: string = editor.getContent() ?? "";
 
         const getChangedContent = (): { editor: TinyMCEEditor; content: string } | null => {
+            if (!this.acceptsInputFrom(element)) {
+                return null;
+            }
+
             const ed = window.tinymce?.get(element.id);
             if (!ed?.hasFocus()) return null;
             const content = ed.getContent();
@@ -261,26 +266,21 @@ export default class FluxDirectiveManager {
             return { editor: ed, content };
         };
 
-        // An editor's value is markup, so it has to be morphed into the bound
-        // element rather than patched as text — a textUpdate would put the
-        // literal "<p>abc</p>" on the page.
+        // An editor's value is markup, so it is morphed into the bound element;
+        // a textUpdate would show the literal tags.
         const sendRichTextUpdate = () => {
             const result = getChangedContent();
             if (!result) return;
             const { editor: ed, content } = result;
 
-            // When shortcodes are present, use the editor body's innerHTML instead
-            // — TinyMCE renders shortcodes as real DOM elements that morph smoothly,
-            // where getContent() would hand us the unrendered shortcode syntax.
+            // TinyMCE renders shortcodes as DOM elements that morph smoothly;
+            // getContent() gives the raw shortcode syntax.
             const value = this.containsShortcode(content)
                 ? ed.getBody().innerHTML
                 : content;
 
-            // Record the editor's own markup, never the rendered body: the
-            // ChangeSet is replayed through the server on the next template
-            // update, and it has to carry the shortcode source the record
-            // actually stores. Without this the preview shows the typing but
-            // the next full render throws it away for the saved content.
+            // Record the editor's own markup, not the rendered body: the ChangeSet is replayed
+            // through the server and must carry the shortcode source.
             this.fluxState.updateField(binding.key, content, {
                 type: "HTML",
                 owner: binding.owner ?? undefined,

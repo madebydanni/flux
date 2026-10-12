@@ -22,6 +22,11 @@ class Configuration
     private static bool $enable_auto_set_fields = true;
 
     /**
+     * Whether Flux's live update runs in CMS preview mode
+     */
+    private static bool $live_update_in_preview_mode = true;
+
+    /**
      * Classes to exclude from flux config generation and live updates.
      * e.g. RedirectorPage, ErrorPage
      *
@@ -32,5 +37,8 @@ class Configuration
         ErrorPage::class,
         VirtualPage::class,
     ];
+
+    private static array $editor_page_javascript = [];
+    private static array $editor_page_css = [];
 
 }

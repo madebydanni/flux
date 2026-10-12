@@ -505,6 +505,7 @@ function applyBootstrapPayload(payload) {
   if (payload.csrf) window.FluxCsrf = payload.csrf;
   if (payload.contextHint !== undefined) window.FluxContextHint = payload.contextHint;
   if (payload.inlineEditorEnabled !== undefined) window.FluxInlineEditorEnabled = payload.inlineEditorEnabled;
+  if (payload.liveUpdateInPreviewMode !== undefined) window.FluxLiveUpdateInPreviewMode = payload.liveUpdateInPreviewMode;
   applyContext(payload.context);
 }
 function applyInlineHostBootstrap() {
@@ -696,6 +697,23 @@ class FluxHostCoordinator {
     }
     return "edit";
   }
+  /**
+   * The live update runs in split mode, and in preview mode unless an editor module owns that mode
+   * (`live_update_in_preview_mode`).
+   */
+  isLiveIn(mode) {
+    if (mode === "split") return true;
+    if (mode === "preview") return window.FluxLiveUpdateInPreviewMode !== false;
+    return false;
+  }
+  /**
+   * Where an editor module owns preview mode, its panels are not Flux's to record. The CMS edit form still is,
+   * so text the module writes into it shows once the author switches to split mode.
+   */
+  acceptsInputFrom(element) {
+    if (this.currentMode() !== "preview" || this.isLiveIn("preview")) return true;
+    return element.closest(".cms-edit-form") !== null;
+  }
   broadcastMode() {
     this.hostChannel.broadcastMessage({
       type: "modeChange",
@@ -728,6 +746,7 @@ class FluxHostCoordinator {
     });
   }
   sendPageUpdateIfChanged() {
+    if (!this.fluxState.getIsActive()) return;
     if (this.fluxState.hasChanges()) {
       this.sendPageTemplateUpdate();
     }
@@ -756,19 +775,21 @@ class FluxHostCoordinator {
     const cmsContainer = document.querySelector(".cms-container");
     if (!cmsContainer) return;
     let lastMode = this.currentMode();
-    this.fluxState.setLiveStateActive(lastMode !== "edit");
+    this.fluxState.setLiveStateActive(this.isLiveIn(lastMode));
     const observer = this.observeClassAttribute(cmsContainer, () => {
       const mode = this.currentMode();
       if (mode === lastMode) return;
+      const wasLive = this.isLiveIn(lastMode);
+      const live = this.isLiveIn(mode);
       /**
-       * Because we are keeping the changes, when switching to a mode with "preview"
+       * Because we are keeping the changes, when switching to a mode with a live preview
        * We apply the config and draft state to match
        */
-      if (lastMode === "edit" && mode !== "edit") {
+      if (!wasLive && live) {
         this.fluxState.setLiveStateActive(true);
         this.sendFluxConfigToIframe();
         this.sendPageUpdateIfChanged();
-      } else if (mode === "edit") {
+      } else if (wasLive && !live) {
         this.fluxState.setLiveStateActive(false);
       }
       lastMode = mode;
@@ -1012,7 +1033,7 @@ class FluxHostCoordinator {
     logger_1.logger.log(`Block ${elementId} saved — dropped its recorded changes, the rest of the page keeps its own:`, dropped);
   }
   setupFluxBindings() {
-    const bindingManager = new FluxDirectiveManager_1.default(this.$, this.fluxState, owner => this.triggerUpdate(owner), this.hostChannel, (key, value, owner) => this.sendPatchUpdate(key, value, owner));
+    const bindingManager = new FluxDirectiveManager_1.default(this.$, this.fluxState, owner => this.triggerUpdate(owner), this.hostChannel, (key, value, owner) => this.sendPatchUpdate(key, value, owner), element => this.acceptsInputFrom(element));
     bindingManager.initialize();
   }
   destroy() {
@@ -1287,12 +1308,14 @@ function shouldUpgradeToHtml(previous, next, inlineEditActive) {
   return previous.trim().length === 0 && String(next).trim().length > 0;
 }
 class FluxDirectiveManager {
-  constructor($, fluxState, onTriggerUpdate, hostChannel, onPatchUpdate) {
+  constructor($, fluxState, onTriggerUpdate, hostChannel, onPatchUpdate, /** False for a form Flux must not record, such as an editor module's own panel. */
+  acceptsInputFrom) {
     this.$ = $;
     this.fluxState = fluxState;
     this.onTriggerUpdate = onTriggerUpdate;
     this.hostChannel = hostChannel;
     this.onPatchUpdate = onPatchUpdate;
+    this.acceptsInputFrom = acceptsInputFrom;
     /**
      * Last value seen per schema-bound field. These can't be tracked on the
      * element the way the entwine bindings do — React hands us a new node on
@@ -1343,6 +1366,8 @@ class FluxDirectiveManager {
     $("[fx-key]").entwine({
       onmatch: function () {
         const element = this[0];
+        // An editor module's panel exists only while Flux stands down for it.
+        if (!manager.acceptsInputFrom(element)) return;
         const binding = (0, FluxDirectives_1.fromElement)(element);
         if (!binding) return;
         // Watch for file upload / react dropdown changes
@@ -1362,6 +1387,7 @@ class FluxDirectiveManager {
     });
   }
   handleInputChange(listenerEvent, element, binding, previousValue) {
+    if (!this.acceptsInputFrom(element)) return previousValue;
     let value;
     let rawType;
     if (binding.collectSelector) {
@@ -1419,6 +1445,7 @@ class FluxDirectiveManager {
       }
       if (currentValue !== previousValue) {
         previousValue = currentValue;
+        if (!this.acceptsInputFrom(element)) return;
         this.fluxState.updateField(binding.key, currentValue, {
           owner: binding.owner ?? undefined
         });
@@ -1436,6 +1463,7 @@ class FluxDirectiveManager {
     if (!editor) return;
     let previousContent = editor.getContent() ?? "";
     const getChangedContent = () => {
+      if (!this.acceptsInputFrom(element)) return null;
       const ed = window.tinymce?.get(element.id);
       if (!ed?.hasFocus()) return null;
       const content = ed.getContent();

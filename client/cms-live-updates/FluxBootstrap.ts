@@ -1,6 +1,7 @@
 /**
- * Bridges the v2 `window.FluxBootstrap` payload into the v1 `window.FluxConfig`
- * shape that FluxLiveState / FluxDirectiveManager already consume.
+ * Bridges the v2 `window.FluxBootstrap` payload into the v1 `window.FluxConfig` shape.
+ *
+ * Connects the `window.FluxBootstrap` and `window.FluxConfig` payloads together.
  *
  * @todo need to merge in the various states from config to livestate into a single var
  */
@@ -38,27 +39,24 @@ export interface FluxBootstrapPayload {
     pageId?: number;
     csrf?: string;
     inlineEditorEnabled?: boolean;
+    liveUpdateInPreviewMode?: boolean;
 }
 
 declare global {
     interface Window {
         FluxBootstrap?: FluxBootstrapPayload;
-        /** Full page-scoped context inlined into the preview frame by FluxExtension (v1-style). */
         FluxFrameContext?: FluxContextPayload;
         FluxScope?: FluxScope;
         FluxCsrf?: string;
         FluxContextHint?: FluxContextHint | null;
         FluxInlineEditorEnabled?: boolean;
+        FluxLiveUpdateInPreviewMode?: boolean;
     }
 }
 
 /**
- * Convert a v2 context payload into the legacy FluxConfig shape.
- *
- * Preserves in-flight ChangeSet only when the same record is still being
- * edited (same page id + class). Switching records resets ChangeSet so we
- * don't misapply edits from page A onto a different record that happens to
- * share a class name.
+ * Converts a v2 context payload into the legacy FluxConfig shape. The in-flight ChangeSet survives only while
+ * the same record (page id and class) is edited.
  */
 export function adaptContextToFluxConfig(context: FluxContextPayload): FluxConfigStructure {
     const fields: Record<string, Record<string, any>> = {};
@@ -108,37 +106,30 @@ export function applyContext(context: FluxContextPayload): void {
     logger.log("Applied Flux context:", context.scope);
 }
 
-/**
- * Read the most-specific FluxBootstrap script tag in the document.
- * When nested items are edited, both LeftAndMain and GridFieldDetailForm add a
- * `<script id="flux-bootstrap-data">` — the inner one (later in DOM order) takes precedence.
- */
+/** Reads the innermost `#flux-bootstrap-data` tag, because nested items add one inside the outer form's. */
 function readBootstrapScriptTag(): FluxBootstrapPayload | null {
     const nodes = document.querySelectorAll<HTMLScriptElement>('script#flux-bootstrap-data');
     if (nodes.length === 0) return null;
 
-    // Walk in reverse so the deepest (innermost form) wins.
     for (let i = nodes.length - 1; i >= 0; i--) {
         const txt = nodes[i].textContent;
         if (!txt) continue;
         try {
             return JSON.parse(txt) as FluxBootstrapPayload;
         } catch {
-            // try the next one
         }
     }
     return null;
 }
 
-/**
- * Host entry: read the inline bootstrap injected by the LeftAndMain or
- * GridFieldDetailForm extension. Returns the FluxConfig that was set,
- * or null if no context was present.
- */
+/** Host entry: applies the inline bootstrap, returning the FluxConfig or null when there is none. */
 function applyBootstrapPayload(payload: FluxBootstrapPayload): void {
     if (payload.csrf) window.FluxCsrf = payload.csrf;
     if (payload.contextHint !== undefined) window.FluxContextHint = payload.contextHint;
     if (payload.inlineEditorEnabled !== undefined) window.FluxInlineEditorEnabled = payload.inlineEditorEnabled;
+    if (payload.liveUpdateInPreviewMode !== undefined) {
+        window.FluxLiveUpdateInPreviewMode = payload.liveUpdateInPreviewMode;
+    }
     applyContext(payload.context!);
 }
 
@@ -149,16 +140,12 @@ export function applyInlineHostBootstrap(): FluxConfigStructure | null {
     return window.FluxConfig ?? null;
 }
 
-/** Most-recent hint captured from a host-side bootstrap, for the host to ship to the frame. */
+/** The latest hint from a host bootstrap, for the host to send to the frame. */
 export function currentContextHint(): FluxContextHint | null {
     return window.FluxContextHint ?? null;
 }
 
-/**
- * Host PJAX hook: read the FluxBootstrap from the most-specific
- * #flux-bootstrap-data <script> tag in the swapped form HTML. Standard CMS PJAX
- * requests only fetch CurrentForm/Content/Breadcrumbs, so the bootstrap is included inside the form HTML.
- */
+/** Host PJAX hook: reads the bootstrap from the swapped form HTML, since a PJAX request fetches only the form. */
 export function applyPjaxBootstrapFromDom(): boolean {
     const payload = readBootstrapScriptTag();
     if (!payload?.context) return false;
@@ -167,11 +154,8 @@ export function applyPjaxBootstrapFromDom(): boolean {
 }
 
 /**
- * Preview-frame entry: fetch /flux/context with the params handed in by
- * the host (via the contextHint MessageChannel message). The frame can't
- * know which record/item is being edited on its own — only the CMS does.
- *
- * Resolves to the FluxConfig once applied.
+ * Preview-frame entry: fetches /flux/context with the params the host sent in the contextHint message, since
+ * only the CMS knows which record is being edited. Resolves to the applied FluxConfig.
  */
 export async function fetchFluxContext(hint: FluxContextHint): Promise<FluxConfigStructure | null> {
     const context = await fetchContextPayload(hint);
@@ -181,9 +165,8 @@ export async function fetchFluxContext(hint: FluxContextHint): Promise<FluxConfi
 }
 
 /**
- * Fetch the context payload without applying it. Lets callers decide whether
- * to apply — the frame's boot fetch must not overwrite a more-specific scope the
- * host may have sent while the fetch was still running.
+ * Fetches the context payload without applying it, so the frame's boot fetch can't overwrite a more specific
+ * scope the host sent meanwhile.
  */
 export async function fetchContextPayload(hint: FluxContextHint): Promise<FluxContextPayload | null> {
     const params = new URLSearchParams();

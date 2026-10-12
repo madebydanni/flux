@@ -11,18 +11,10 @@ const CMS_FRAME = 'iframe[name="cms-preview-iframe"]';
 const PAGE_COOLDOWN_MS = 500;
 const BLOCK_COOLDOWN_MS = 500;
 
-/**
- * Elemental saves and publishes a single block through its own JSON API from
- * React, so those writes never reach entwine's `aftersubmitform` or jQuery's
- * `ajaxComplete` — watching fetch is the only hook that sees them.
- */
+/** Elemental saves through its own JSON API from React, so only watching fetch sees those writes. */
 const BLOCK_SAVE_URL = /\/elemental-area\/api\/(saveForm|publish|unpublish)\b/;
 
-/**
- * Which block a save was for. `saveForm` carries the id in the path
- * (`POST api/saveForm/$ID`); publish and unpublish carry it in the JSON body.
- * Returns null when neither says — the caller must not guess.
- */
+/** The block a save was for, read from the `saveForm` path or the publish and unpublish JSON body. */
 function blockIdFromSave(url: string, init?: RequestInit): string | null {
     const fromPath = url.match(/\/api\/saveForm\/(\d+)/);
     if (fromPath) {
@@ -42,10 +34,7 @@ function blockIdFromSave(url: string, init?: RequestInit): string | null {
     }
 }
 
-/**
- * Returns a predicate that reports whether a given key has "cooled down" since
- * its last allowed call. Calling the predicate updates the last-call time.
- */
+/** Returns a predicate that is true once a key has cooled down since its last allowed call, and records the call. */
 function createCooldownGate(ms: number) {
     const lastCalled = new Map<string, number>();
     return (key = "default") => {
@@ -57,13 +46,8 @@ function createCooldownGate(ms: number) {
 }
 
 /**
- * The CMS posts its edit form with `X-Pjax: CurrentForm,Breadcrumbs,ValidationResult`,
- * so the response body is a fragment map whose ValidationResult entry wraps
- * `{ isValid, messages }` in a `<script type="application/json">` tag (see
- * RequestHandler::prepareDataForPjax).
- *
- * Only a definite failure counts: a response we can't classify is treated as a
- * successful save, which is the same assumption the CMS makes of it.
+ * Whether the CMS's PJAX save response reports a validation failure. Only a definite failure counts; a response
+ * that can't be classified is treated as a successful save, as the CMS does.
  */
 function validationFailed(xhr?: XMLHttpRequest): boolean {
     const body = xhr?.responseText;
@@ -112,9 +96,7 @@ export default class FluxHostCoordinator {
         this.setupPjaxHandler();
         this.setupSaveHandlers();
 
-        // The frame may have loaded (and posted FRAME_READY) before this host
-        // existed — e.g. on a direct refresh, where window.load fires after the
-        // iframe. Connect to it now so we don't sit on a dead channel.
+        // The frame may have posted FRAME_READY before this host existed, such as on a direct refresh.
         this.hostChannel.connectExistingFrame();
     }
 
@@ -134,6 +116,41 @@ export default class FluxHostCoordinator {
         return "edit";
     }
 
+
+    /**
+     * Check if the Live Editing mode is on based on CMS Mode
+     *
+     * Preview mode can be configured on or off via Configuration
+     * `'Configuration::live_update_in_preview_mode`
+     *
+     * @param mode
+     * @returns
+     */
+    private isLiveOnMode(mode: FluxCmsMode): boolean {
+        if (mode === "split") {
+            return true;
+        }
+
+
+        if (mode === "preview") {
+            return window.FluxLiveUpdateInPreviewMode !== false;
+        }
+
+        return false;
+    }
+
+    private acceptsInputFrom(element: HTMLElement): boolean {
+        if (this.currentMode() !== "preview") {
+            return true;
+        }
+
+        if (this.isLiveOnMode("preview")) {
+            return true;
+        }
+
+        return element.closest(".cms-edit-form") !== null;
+    }
+
     private broadcastMode(): void {
         this.hostChannel.broadcastMessage({
             type: "modeChange",
@@ -149,10 +166,7 @@ export default class FluxHostCoordinator {
         });
     }
 
-    /**
-     * Provides a hint to the frame what the active record is, its relation
-     * This can then be used to fetch additional information based on its scope and state
-     */
+    /** Tells the frame which record is active, so it can fetch more by that scope. */
     private sendContextHintToIframe(): void {
         const hint = currentContextHint();
         if (!hint) {
@@ -169,6 +183,10 @@ export default class FluxHostCoordinator {
     }
 
     private sendPageUpdateIfChanged(): void {
+        if (!this.fluxState.getIsActive()) {
+            return;
+        }
+
         if (this.fluxState.hasChanges()) {
             this.sendPageTemplateUpdate();
         }
@@ -204,21 +222,21 @@ export default class FluxHostCoordinator {
         if (!cmsContainer) return;
 
         let lastMode = this.currentMode();
-        this.fluxState.setLiveStateActive(lastMode !== "edit");
+        this.fluxState.setLiveStateActive(this.isLiveOnMode(lastMode));
 
         const observer = this.observeClassAttribute(cmsContainer, () => {
             const mode = this.currentMode();
             if (mode === lastMode) return;
 
-            /**
-             * Because we are keeping the changes, when switching to a mode with "preview"
-             * We apply the config and draft state to match
-             */
-            if (lastMode === "edit" && mode !== "edit") {
+            const wasLive = this.isLiveOnMode(lastMode);
+            const live = this.isLiveOnMode(mode);
+
+            // Changes are kept, so entering a live mode re-applies the config and draft state.
+            if (!wasLive && live) {
                 this.fluxState.setLiveStateActive(true);
                 this.sendFluxConfigToIframe();
                 this.sendPageUpdateIfChanged();
-            } else if (mode === "edit") {
+            } else if (wasLive && !live) {
                 this.fluxState.setLiveStateActive(false);
             }
 
@@ -229,11 +247,7 @@ export default class FluxHostCoordinator {
         this.observers.push(observer);
     }
 
-    /**
-     * A workaround for Modals, when a model is closed we treat these as a 'templateUpdate' event
-     * So that if we have a Link / Image etc. Its re-rendered in the preview panel
-     * @returns
-     */
+    /** Treats a closed modal as a 'templateUpdate', so an edited Link or Image re-renders in the preview. */
     private setupModalObserver(): void {
         const bodyElement = document.body;
         if (!bodyElement) return;
@@ -361,8 +375,7 @@ export default class FluxHostCoordinator {
     }
 
     /**
-     * Part of the 'Inline' preview ui work.
-     * Sends all the draft state and will iterate through the blocks and save them in a single transaction.
+     * Saves all draft state block by block in one transaction.
      *
      * @TODO not yet final
      */
@@ -415,9 +428,7 @@ export default class FluxHostCoordinator {
         }
     }
 
-    /**
-     * Wait so the swapped html contains the new script so we can apply the bootstrapping information
-     */
+    /** Waits for the swapped HTML to contain the new script before applying the bootstrap. */
     private setupPjaxHandler(): void {
         this.$(document).on("ajaxComplete", () => {
             requestAnimationFrame(() => {
@@ -428,24 +439,13 @@ export default class FluxHostCoordinator {
     }
 
     /**
-     * A save makes the database authoritative for the record being edited, so
-     * the changes we recorded on the way there have to go.
-     *
-     * The preview iframe reloads immediately afterwards — silverstripe/admin's
-     * own `onaftersubmitform` calls `_initialiseFromContent()`, and elemental
-     * refreshes the preview after a block write — and the FRAME_READY that
-     * follows would otherwise replay the ChangeSet over the freshly saved
-     * render, reverting the preview to whatever we last captured. For a rich
-     * text field that is several keystrokes behind what was actually written.
-     *
-     * Letting the reload stand rather than pushing a render of our own also
-     * keeps the preview on whichever stage the CMS is previewing;
-     * /flux/pageTemplateUpdate always renders Draft.
+     * A save makes the database authoritative, so the recorded changes are dropped. The preview reloads after a save
+     * and its FRAME_READY would replay the ChangeSet over the saved render, so the reload stands and keeps the stage
+     * the CMS is previewing (/flux/pageTemplateUpdate always renders Draft).
      */
     private setupSaveHandlers(): void {
         const coordinator = this;
 
-        // Page and GridField detail forms submit through entwine.
         this.$.entwine("flux", function ($: any) {
             $(".cms-edit-form").entwine({
                 onaftersubmitform: function (this: any, event: any, data: any) {
@@ -459,9 +459,8 @@ export default class FluxHostCoordinator {
     }
 
     /**
-     * Elemental's block save / publish / unpublish go out as fetch calls from
-     * React, so we watch fetch itself. Responses are only inspected, never
-     * read — consuming the body here would starve the real caller.
+     * Watches fetch for Elemental's React block save, publish and unpublish. Responses are only inspected, because
+     * reading the body would starve the real caller.
      */
     private watchBlockSaves(): void {
         if (this.unwatchSaves) return;
@@ -519,12 +518,7 @@ export default class FluxHostCoordinator {
         );
     }
 
-    /**
-     * A block write makes the database authoritative for that block alone. The
-     * page's own pending edits, and every other block's, are still unsaved and
-     * must survive — dropping them here would silently discard work the user
-     * can still see in the preview.
-     */
+    /** A block write makes the database authoritative for that block alone; the other pending edits must survive. */
     private handleBlockSaved(url: string, init?: RequestInit): void {
         const elementId = blockIdFromSave(url, init);
 
@@ -552,6 +546,7 @@ export default class FluxHostCoordinator {
             (owner) => this.triggerUpdate(owner),
             this.hostChannel,
             (key, value, owner) => this.sendPatchUpdate(key, value, owner),
+            (element) => this.acceptsInputFrom(element),
         );
 
         bindingManager.initialize();
